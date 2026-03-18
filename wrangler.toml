@@ -1,12 +1,19 @@
-name = "ywgyw"
+name = "m3u-proxy-worker"
 main = "src/index.js"
-compatibility_date = "2024-03-18"
+compatibility_date = "2023-10-25"
 
+# 定时任务：每天凌晨 3:00 (UTC) 自动抓取更新直播源
+[triggers]
+crons = ["0 3 * * *"]
+
+# KV 命名空间绑定
+# 注意：部署前，请先在终端运行 `npx wrangler kv:namespace create IPTV_KV`
+# 然后将生成的 id 填入下方
 [[kv_namespaces]]
 binding = "IPTV_KV"
 id = "4d517e225a12416c8036466eef0543be"
 
-# 新增：配置定时触发器
-[triggers]
-# "0 */6 * * *" 表示每 6 小时自动执行一次抓取任务
-crons = ["0 */6 * * *"]
+# 环境变量 (设置管理员默认账号密码，可在后台修改)
+[vars]
+DEFAULT_ADMIN_USER = "admin"
+DEFAULT_ADMIN_PASS = "admin123"
