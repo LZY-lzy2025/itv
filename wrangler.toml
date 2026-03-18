@@ -1,4 +1,4 @@
-name = "m3u-proxy-worker"
+name = "m3ugc"
 main = "src/index.js"
 compatibility_date = "2023-10-25"
 
