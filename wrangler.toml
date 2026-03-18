@@ -5,7 +5,6 @@ compatibility_date = "2024-03-18"
 [[kv_namespaces]]
 binding = "IPTV_KV"
 id = "4d517e225a12416c8036466eef0543be"
-id = "你的_KV_ID"
 
 # 新增：配置定时触发器
 [triggers]
