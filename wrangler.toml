@@ -11,7 +11,7 @@ crons = ["*/10 * * * *"]
 # 然后将生成的 id 填入下方
 [[kv_namespaces]]
 binding = "IPTV_KV"
-id = "4d517e225a12416c8036466eef0543be"
+id = "a089b1636c7b49d885e4ffe8dc2c4e17"
 
 # 环境变量 (设置管理员默认账号密码，可在后台修改)
 [vars]
