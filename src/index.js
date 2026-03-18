@@ -25,9 +25,20 @@ export default {
       return new Response(renderAdminPage(), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
-    // --- 5. 用户主页 ---
+    // --- 5. 用户端 API (注册/登录/看板操作) ---
+    if (path.startsWith('/api/user/')) {
+      return await handleUserAPI(request, env, url);
+    }
+
+    // --- 6. 用户前端页面路由 ---
+    if (path === '/login') {
+      return new Response(renderLoginPage(), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+    }
+    
     if (path === '/') {
-      return new Response(renderUserPage(), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
+      const username = await getUserSession(request, env);
+      if (!username) return Response.redirect(url.origin + '/login', 302);
+      return new Response(renderUserDashboard(username), { headers: { 'Content-Type': 'text/html;charset=UTF-8' } });
     }
 
     return new Response('Not Found', { status: 404 });
@@ -39,6 +50,16 @@ export default {
   }
 };
 
+// ================= 会话与鉴权辅助函数 =================
+
+async function getUserSession(request, env) {
+  const cookieHeader = request.headers.get('Cookie') || '';
+  const match = cookieHeader.match(/session_id=([^;]+)/);
+  if (!match) return null;
+  const sessionId = match[1];
+  return await env.IPTV_KV.get('session:' + sessionId);
+}
+
 // ================= 核心业务函数 =================
 
 async function handlePlay(request, env, url) {
@@ -48,21 +69,22 @@ async function handlePlay(request, env, url) {
   if (!token) return new Response('Missing Token', { status: 401 });
 
   const tokenLimitStr = await env.IPTV_KV.get('token:' + token);
-  if (!tokenLimitStr) return new Response('Invalid Token or Token Expired', { status: 403 });
+  if (!tokenLimitStr) return new Response('Invalid Token or Expired', { status: 403 });
   
   const limit = parseInt(tokenLimitStr);
   const clientIP = request.headers.get('CF-Connecting-IP') || '127.0.0.1';
   
-  let ips = await env.IPTV_KV.get('ips:' + token, 'json') || [];
-  if (!ips.includes(clientIP)) {
-    if (ips.length >= limit) {
-      // 【核心功能 1】发现溢出 IP 访问，直接删除该 Token 和相关记录
-      await env.IPTV_KV.delete('token:' + token);
-      await env.IPTV_KV.delete('ips:' + token);
-      return new Response('Security Triggered: IP limit exceeded. This Token has been permanently disabled.', { status: 403 });
+  // 【更新】如果 limit 为 0，视为无限 IP，跳过检查
+  if (limit > 0) {
+    let ips = await env.IPTV_KV.get('ips:' + token, 'json') || [];
+    if (!ips.includes(clientIP)) {
+      if (ips.length >= limit) {
+        // 【更新】不再删除 Token，只拒绝访问
+        return new Response('Security Triggered: IP limit exceeded. Please go to dashboard to reset IPs.', { status: 403 });
+      }
+      ips.push(clientIP);
+      await env.IPTV_KV.put('ips:' + token, JSON.stringify(ips));
     }
-    ips.push(clientIP);
-    await env.IPTV_KV.put('ips:' + token, JSON.stringify(ips));
   }
 
   const channelsStr = await env.IPTV_KV.get('data:channels');
@@ -71,7 +93,7 @@ async function handlePlay(request, env, url) {
   const channels = JSON.parse(channelsStr);
   const target = channels.find(c => c.id === channelId);
   
-  if (!target) return new Response('Channel Not Found: ' + channelId, { status: 404 });
+  if (!target) return new Response('Channel Not Found', { status: 404 });
 
   return new Response(null, {
     status: 302,
@@ -98,7 +120,7 @@ async function updateM3USource(env) {
       await env.IPTV_KV.put('data:channels', JSON.stringify(channels));
       return { success: true, count: channels.length };
     }
-    return { success: false, msg: 'No valid channels found in source' };
+    return { success: false, msg: 'No valid channels found' };
   } catch (err) {
     return { success: false, msg: err.message };
   }
@@ -163,6 +185,100 @@ async function generateUserM3U(request, env, url) {
   return new Response(m3u, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } });
 }
 
+// ================= 用户端 API (注册/看板) =================
+
+async function handleUserAPI(request, env, url) {
+  const route = url.pathname.replace('/api/user/', '');
+
+  if (request.method === 'POST' && route === 'register') {
+    const { username, password } = await request.json();
+    if (!username || !password) return Response.json({ success: false, msg: '缺少账密' });
+    const exists = await env.IPTV_KV.get('user:' + username);
+    if (exists) return Response.json({ success: false, msg: '用户名已存在' });
+    
+    await env.IPTV_KV.put('user:' + username, password);
+    return Response.json({ success: true });
+  }
+
+  if (request.method === 'POST' && route === 'login') {
+    const { username, password } = await request.json();
+    const storedPass = await env.IPTV_KV.get('user:' + username);
+    if (!storedPass || storedPass !== password) return Response.json({ success: false, msg: '账号或密码错误' });
+    
+    // 生成会话，存活 7 天
+    const sessionId = crypto.randomUUID();
+    await env.IPTV_KV.put('session:' + sessionId, username, { expirationTtl: 604800 });
+    
+    return new Response(JSON.stringify({ success: true }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Set-Cookie': 'session_id=' + sessionId + '; Path=/; Max-Age=604800; HttpOnly'
+      }
+    });
+  }
+
+  // 以下接口需要登录
+  const username = await getUserSession(request, env);
+  if (!username) return Response.json({ success: false, msg: '未登录' }, { status: 401 });
+
+  if (request.method === 'POST' && route === 'bind') {
+    const { token } = await request.json();
+    const tokenExists = await env.IPTV_KV.get('token:' + token);
+    if (!tokenExists) return Response.json({ success: false, msg: '无效的或已过期的 Token' });
+
+    // 检查是否已被绑定
+    const owner = await env.IPTV_KV.get('owner:' + token);
+    if (owner && owner !== username) return Response.json({ success: false, msg: '该 Token 已被其他用户绑定' });
+    
+    await env.IPTV_KV.put('owner:' + token, username);
+    
+    // 更新用户的 Token 列表
+    let list = await env.IPTV_KV.get('user_tokens:' + username, 'json') || [];
+    if (!list.includes(token)) {
+      list.push(token);
+      await env.IPTV_KV.put('user_tokens:' + username, JSON.stringify(list));
+    }
+    return Response.json({ success: true });
+  }
+
+  if (request.method === 'GET' && route === 'tokens') {
+    let list = await env.IPTV_KV.get('user_tokens:' + username, 'json') || [];
+    let result = [];
+    for (let t of list) {
+      const limitStr = await env.IPTV_KV.get('token:' + t);
+      if (limitStr) { // 只返回还没过期的
+        const ips = await env.IPTV_KV.get('ips:' + t, 'json') || [];
+        result.push({ token: t, limit: parseInt(limitStr), used: ips.length });
+      }
+    }
+    return Response.json(result);
+  }
+
+  if (request.method === 'POST' && route === 'reset_ip') {
+    const { token } = await request.json();
+    const owner = await env.IPTV_KV.get('owner:' + token);
+    if (owner !== username) return Response.json({ success: false, msg: '无权操作' });
+    
+    await env.IPTV_KV.put('ips:' + token, '[]');
+    return Response.json({ success: true });
+  }
+
+  if (request.method === 'POST' && route === 'logout') {
+    const cookieHeader = request.headers.get('Cookie') || '';
+    const match = cookieHeader.match(/session_id=([^;]+)/);
+    if (match) await env.IPTV_KV.delete('session:' + match[1]);
+    
+    return new Response(JSON.stringify({ success: true }), {
+      headers: {
+        'Content-Type': 'application/json',
+        'Set-Cookie': 'session_id=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT'
+      }
+    });
+  }
+
+  return new Response('Not Found', { status: 404 });
+}
+
 // ================= 后台管理 API & 鉴权 =================
 
 async function checkAuth(request, env) {
@@ -207,15 +323,15 @@ async function handleAdminAPI(request, env, url) {
       const t = k.name.replace('token:', '');
       const limit = await env.IPTV_KV.get(k.name);
       const ips = await env.IPTV_KV.get('ips:' + t, 'json') || [];
+      const owner = await env.IPTV_KV.get('owner:' + t) || '未绑定';
       
       let expireText = '永久有效';
       if (k.expiration) {
-        // KV 返回的 expiration 是秒级时间戳，转为东八区时间展示
         const d = new Date(k.expiration * 1000);
         expireText = d.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
       }
 
-      return { token: t, limit: parseInt(limit), used: ips.length, ips: ips, expireText: expireText };
+      return { token: t, limit: parseInt(limit), used: ips.length, ips: ips, expireText: expireText, owner: owner };
     }));
     return Response.json(tokens);
   }
@@ -223,14 +339,12 @@ async function handleAdminAPI(request, env, url) {
   if (request.method === 'POST' && route === 'token') {
     const body = await request.json();
     const options = {};
-    
-    // 【核心功能 2】利用 KV 原生的 expirationTtl 设置存活时间
     if (body.expireHours && Number(body.expireHours) > 0) {
-       // expirationTtl 必须以秒为单位，且最小值为 60 秒
        options.expirationTtl = Math.max(60, Number(body.expireHours) * 3600);
     }
-
-    await env.IPTV_KV.put('token:' + body.token, body.limit.toString(), options);
+    // 0 代表无限
+    const limitVal = body.limit === '' ? '0' : body.limit.toString();
+    await env.IPTV_KV.put('token:' + body.token, limitVal, options);
     return Response.json({ success: true });
   }
 
@@ -238,6 +352,13 @@ async function handleAdminAPI(request, env, url) {
     const body = await request.json();
     await env.IPTV_KV.delete('token:' + body.token);
     await env.IPTV_KV.delete('ips:' + body.token);
+    await env.IPTV_KV.delete('owner:' + body.token);
+    return Response.json({ success: true });
+  }
+
+  if (request.method === 'POST' && route === 'reset_ip') {
+    const body = await request.json();
+    await env.IPTV_KV.put('ips:' + body.token, '[]');
     return Response.json({ success: true });
   }
 
@@ -246,37 +367,143 @@ async function handleAdminAPI(request, env, url) {
 
 // ================= 前端页面渲染 (HTML/CSS/JS) =================
 
-function renderUserPage() {
+function renderLoginPage() {
   return `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>IPTV 订阅获取</title>
+  <title>系统登录/注册</title>
   <style>
-    body { font-family: system-ui, sans-serif; background: #f4f4f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
-    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
-    input { width: 90%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-    button { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; width: 100%; }
-    button:hover { background: #2563eb; }
+    body { font-family: system-ui; background: #f4f4f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 300px; text-align: center; }
+    input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+    button { color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; width: 100%; margin-top: 10px; }
+    .btn-login { background: #3b82f6; }
+    .btn-reg { background: #10b981; }
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>获取你的专属订阅</h2>
-    <p>请输入管理员分配给你的 Token</p>
-    <input type="text" id="token" placeholder="输入 Token">
-    <button onclick="getSub()">生成并复制链接</button>
+    <h2>IPTV 订阅系统</h2>
+    <input type="text" id="user" placeholder="用户名">
+    <input type="password" id="pass" placeholder="密码">
+    <button class="btn-login" onclick="doAction('login')">登录</button>
+    <button class="btn-reg" onclick="doAction('register')">注册新账号</button>
   </div>
   <script>
-    function getSub() {
-      const token = document.getElementById('token').value.trim();
-      if(!token) return alert('请输入 Token');
-      const url = window.location.origin + '/sub?token=' + token;
-      navigator.clipboard.writeText(url).then(function() {
-        alert('订阅链接已复制到剪贴板！');
+    async function doAction(action) {
+      const u = document.getElementById('user').value;
+      const p = document.getElementById('pass').value;
+      if(!u || !p) return alert('请输入账密');
+      
+      const res = await fetch('/api/user/' + action, {
+        method: 'POST', body: JSON.stringify({username: u, password: p})
       });
+      const data = await res.json();
+      if(data.success) {
+        if(action === 'register') alert('注册成功，请登录！');
+        else window.location.href = '/';
+      } else {
+        alert(data.msg);
+      }
     }
+  </script>
+</body>
+</html>`;
+}
+
+function renderUserDashboard(username) {
+  return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>用户控制台</title>
+  <style>
+    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }
+    .container { max-width: 800px; margin: auto; }
+    .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
+    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+    button { background: #3b82f6; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
+    button.warning { background: #f59e0b; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+    th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
+    .header { display: flex; justify-content: space-between; align-items: center; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>欢迎回来, ` + username + `</h1>
+      <button class="warning" onclick="logout()">退出登录</button>
+    </div>
+    
+    <div class="card">
+      <h2>绑定新 Token</h2>
+      <p>请输入管理员分发给您的 Token 激活码进行绑定：</p>
+      <input type="text" id="bindToken" placeholder="输入 Token">
+      <button onclick="bind()">立即绑定</button>
+    </div>
+
+    <div class="card">
+      <h2>我的订阅列表</h2>
+      <table>
+        <thead><tr>
+          <th>Token</th>
+          <th>状态/限制</th>
+          <th>M3U 订阅链接</th>
+          <th>操作</th>
+        </tr></thead>
+        <tbody id="list"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    async function loadData() {
+      const res = await fetch('/api/user/tokens');
+      const data = await res.json();
+      const tbody = document.getElementById('list');
+      let html = '';
+      for(let i=0; i<data.length; i++) {
+        let t = data[i];
+        let limitTxt = t.limit === 0 ? '无限 IP' : (t.used + ' / ' + t.limit + ' IP');
+        let subLink = window.location.origin + '/sub?token=' + t.token;
+        
+        html += '<tr>' +
+          '<td>' + t.token + '</td>' +
+          '<td>' + limitTxt + '</td>' +
+          '<td><button onclick="copy(\\'' + subLink + '\\')">复制订阅链接</button></td>' +
+          '<td><button class="warning" onclick="resetIp(\\'' + t.token + '\\')">解除IP封锁</button></td>' +
+        '</tr>';
+      }
+      tbody.innerHTML = html;
+    }
+
+    async function bind() {
+      const t = document.getElementById('bindToken').value;
+      if(!t) return;
+      const res = await fetch('/api/user/bind', { method: 'POST', body: JSON.stringify({token: t}) });
+      const data = await res.json();
+      if(data.success) { alert('绑定成功'); document.getElementById('bindToken').value=''; loadData(); }
+      else alert(data.msg);
+    }
+
+    async function resetIp(token) {
+      await fetch('/api/user/reset_ip', { method: 'POST', body: JSON.stringify({token: token}) });
+      alert('已重置该 Token 的 IP 记录');
+      loadData();
+    }
+
+    async function logout() {
+      await fetch('/api/user/logout', { method: 'POST' });
+      window.location.href = '/login';
+    }
+
+    function copy(text) {
+      navigator.clipboard.writeText(text).then(() => alert('已复制！'));
+    }
+
+    loadData();
   </script>
 </body>
 </html>`;
@@ -287,19 +514,17 @@ function renderAdminPage() {
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>M3U Proxy 管理后台</title>
+  <title>管理后台</title>
   <style>
-    body { font-family: system-ui, sans-serif; background: #f9fafb; margin: 0; padding: 20px; }
+    body { font-family: system-ui; background: #f9fafb; margin: 0; padding: 20px; }
     .container { max-width: 900px; margin: auto; }
     .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
-    h2 { margin-top: 0; }
-    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
     button { background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
     button.danger { background: #ef4444; }
+    button.warning { background: #f59e0b; }
     table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 14px; }
     th, td { padding: 10px; text-align: left; border-bottom: 1px solid #ddd; }
-    .warning-text { color: #ef4444; font-size: 12px; margin-top: 5px; }
   </style>
 </head>
 <body>
@@ -307,31 +532,26 @@ function renderAdminPage() {
     <h1>管理后台</h1>
     
     <div class="card">
-      <h2>1. 原始直播源设置</h2>
-      <p>当前状态：频道数 <span id="chCount">0</span></p>
+      <h2>1. 原始直播源</h2>
+      <p>频道数 <span id="chCount">0</span></p>
       <input type="text" id="sourceUrl" placeholder="输入 M3U 订阅链接" style="width: 70%;">
       <button onclick="saveConfig()">保存</button>
-      <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取更新</button>
+      <button onclick="syncM3U()" style="background:#3b82f6;">立即抓取</button>
     </div>
 
     <div class="card">
-      <h2>2. Token 管理</h2>
-      <p class="warning-text">注：如果请求的 IP 数量超过限制，Token 将被自动且永久地删除作废。</p>
-      
+      <h2>2. Token 管理 (激活码)</h2>
+      <p style="color:#666; font-size:12px;">给用户分发下方的 Token。IP限制填 0 代表无限IP。</p>
       <div style="display:flex; gap: 10px; margin-bottom: 10px;">
-        <input type="text" id="newToken" placeholder="自定义 Token" style="flex: 2;">
-        <input type="number" id="newLimit" placeholder="最大允许IP数" value="3" style="flex: 1;">
-        <input type="number" id="expireHours" placeholder="有效期(小时)，留空为永久" style="flex: 1.5;">
-        <button onclick="addToken()" style="flex: 1;">生成 Token</button>
+        <input type="text" id="newToken" placeholder="生成新 Token" style="flex: 2;">
+        <input type="number" id="newLimit" placeholder="IP限制(0为无限)" value="3" style="flex: 1;">
+        <input type="number" id="expireHours" placeholder="有效期(小时)" style="flex: 1.5;">
+        <button onclick="addToken()" style="flex: 1;">生成</button>
       </div>
       
       <table>
         <thead><tr>
-          <th>Token</th>
-          <th>IP 限制</th>
-          <th>已用 IP</th>
-          <th>过期时间</th>
-          <th>操作</th>
+          <th>Token</th><th>归属用户</th><th>IP 状态</th><th>过期时间</th><th>操作</th>
         </tr></thead>
         <tbody id="tokenList"></tbody>
       </table>
@@ -350,15 +570,18 @@ function renderAdminPage() {
       const tbody = document.getElementById('tokenList');
       
       let html = '';
-      for(let i = 0; i < tokens.length; i++) {
+      for(let i=0; i<tokens.length; i++) {
         let t = tokens[i];
-        let ipsStr = t.ips.join(', ');
+        let limitTxt = t.limit === 0 ? '无限' : (t.used + '/' + t.limit);
         html += '<tr>' +
           '<td>' + t.token + '</td>' +
-          '<td>' + t.limit + '</td>' +
-          '<td><span title="' + ipsStr + '">' + t.used + '</span></td>' +
+          '<td>' + t.owner + '</td>' +
+          '<td><span title="' + t.ips.join(', ') + '">' + limitTxt + '</span></td>' +
           '<td>' + t.expireText + '</td>' +
-          '<td><button class="danger" onclick="delToken(\\'' + t.token + '\\')">删除</button></td>' +
+          '<td>' +
+            '<button class="warning" onclick="resetIp(\\'' + t.token + '\\')" style="margin-right:5px;">清IP</button>' +
+            '<button class="danger" onclick="delToken(\\'' + t.token + '\\')">删</button>' +
+          '</td>' +
         '</tr>';
       }
       tbody.innerHTML = html;
@@ -373,11 +596,7 @@ function renderAdminPage() {
     async function syncM3U() {
       const res = await fetch('/admin/api/sync', { method: 'POST' });
       const data = await res.json();
-      if(data.success) {
-        alert('抓取成功，共更新 ' + data.count + ' 个频道');
-      } else {
-        alert('抓取失败: ' + data.msg);
-      }
+      alert(data.success ? '成功更新频道' : '失败: ' + data.msg);
       loadData();
     }
 
@@ -385,26 +604,21 @@ function renderAdminPage() {
       const token = document.getElementById('newToken').value;
       const limit = document.getElementById('newLimit').value;
       const expireHours = document.getElementById('expireHours').value;
-      
       if(!token) return alert('请输入 Token');
       
-      const payload = { 
-        token: token, 
-        limit: limit,
-        expireHours: expireHours
-      };
-
-      await fetch('/admin/api/token', { method: 'POST', body: JSON.stringify(payload) });
-      
-      // 清空输入框
+      await fetch('/admin/api/token', { method: 'POST', body: JSON.stringify({ token: token, limit: limit, expireHours: expireHours }) });
       document.getElementById('newToken').value = '';
-      document.getElementById('expireHours').value = '';
       loadData();
     }
 
     async function delToken(token) {
       if(!confirm('确定删除吗？')) return;
       await fetch('/admin/api/token', { method: 'DELETE', body: JSON.stringify({ token: token }) });
+      loadData();
+    }
+
+    async function resetIp(token) {
+      await fetch('/admin/api/reset_ip', { method: 'POST', body: JSON.stringify({ token: token }) });
       loadData();
     }
 
