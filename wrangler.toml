@@ -1,4 +1,4 @@
-name = "my-iptv-worker"
+name = "itv"
 main = "src/index.js"
 compatibility_date = "2024-03-18"
 
