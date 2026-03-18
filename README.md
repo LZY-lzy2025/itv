@@ -50,8 +50,8 @@
    * **KV 命名空间**选择你第一步创建的 `IPTV_KV`。
 4. **设置管理员账号密码**（可选）：
    * 在“环境变量”处点击“添加变量”。
-   * 添加 `DEFAULT_ADMIN_USER`，值为你的管理员账号（默认 admin）。
-   * 添加 `DEFAULT_ADMIN_PASS`，值为你的管理员密码（默认 admin123）。
+   * 添加 `DEFAULT_ADMIN_USER`。
+   * 添加 `DEFAULT_ADMIN_PASS`。
 5. 点击底部的 **保存并部署**。
 
 ### 第四步：设置自动更新 (Cron 定时任务)
