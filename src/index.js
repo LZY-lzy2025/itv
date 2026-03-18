@@ -3,7 +3,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname;
 
-    // --- 1. 播放路由重定向 (核心鉴权) ---
+    // --- 1. 播放路由重定向 ---
     if (path.startsWith('/play/')) {
       return await handlePlay(request, env, url);
     }
@@ -43,11 +43,12 @@ export default {
 
 async function handlePlay(request, env, url) {
   const token = url.searchParams.get('token');
-  const channelId = url.pathname.replace('/play/', '');
+  // 修复：严谨去除路径前缀和可能存在的尾部斜杠
+  const channelId = url.pathname.replace('/play/', '').replace(/\/$/, '');
   
   if (!token) return new Response('Missing Token', { status: 401 });
 
-  // 验证 Token 和 IP 限制
+  // 1. 验证 Token 和 IP 限制
   const tokenLimitStr = await env.IPTV_KV.get(`token:${token}`);
   if (!tokenLimitStr) return new Response('Invalid Token', { status: 403 });
   
@@ -63,16 +64,26 @@ async function handlePlay(request, env, url) {
     await env.IPTV_KV.put(`ips:${token}`, JSON.stringify(ips));
   }
 
-  // 查找频道并重定向
+  // 2. 查找频道并重定向
   const channelsStr = await env.IPTV_KV.get('data:channels');
-  if (!channelsStr) return new Response('No Channels', { status: 500 });
+  if (!channelsStr) return new Response('No Channels Data', { status: 500 });
   
   const channels = JSON.parse(channelsStr);
   const target = channels.find(c => c.id === channelId);
   
-  if (!target) return new Response('Channel Not Found', { status: 404 });
+  if (!target) return new Response(`Channel Not Found: ${channelId}`, { status: 404 });
 
-  return Response.redirect(target.url, 302);
+  // 修复：构造带有完善 CORS 头和防缓存的 302 重定向
+  return new Response(null, {
+    status: 302,
+    headers: {
+      'Location': target.url,
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    }
+  });
 }
 
 async function updateM3USource(env) {
@@ -88,10 +99,20 @@ async function updateM3USource(env) {
       await env.IPTV_KV.put('data:channels', JSON.stringify(channels));
       return { success: true, count: channels.length };
     }
-    return { success: false, msg: 'No channels found in source' };
+    return { success: false, msg: 'No valid channels found in source' };
   } catch (err) {
     return { success: false, msg: err.message };
   }
+}
+
+// 修复：生成固定的哈希 ID，防止每次同步导致之前生成的链接失效
+function generateFixedId(name, url) {
+  const str = name + url;
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = Math.imul(31, hash) + str.charCodeAt(i) | 0;
+  }
+  return 'ch_' + Math.abs(hash).toString(36);
 }
 
 function parseM3U(content) {
@@ -111,9 +132,8 @@ function parseM3U(content) {
         group: groupMatch ? groupMatch[1] : 'Default'
       };
     } else if (line.startsWith('http')) {
-      // 使用简单的 hash 生成 ID，避免特殊字符导致 URL 问题
       channels.push({
-        id: 'ch_' + Math.random().toString(36).substr(2, 9),
+        id: generateFixedId(info.name || '', line), // 使用固定 ID 替代 Math.random
         url: line,
         ...info
       });
@@ -220,7 +240,7 @@ function renderUserPage() {
   <style>
     body { font-family: system-ui, sans-serif; background: #f4f4f5; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
     .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); width: 100%; max-width: 400px; text-align: center; }
-    input { width: 90%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; }
+    input { width: 90%; padding: 10px; margin: 10px 0; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
     button { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; width: 100%; }
     button:hover { background: #2563eb; }
   </style>
@@ -256,7 +276,7 @@ function renderAdminPage() {
     .container { max-width: 800px; margin: auto; }
     .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 20px; }
     h2 { margin-top: 0; }
-    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 70%; }
+    input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 70%; box-sizing: border-box; }
     button { background: #10b981; color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; }
     button.danger { background: #ef4444; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; }
@@ -339,5 +359,4 @@ function renderAdminPage() {
     loadData();
   </script>
 </body>
-</html>`;
-}
+</html>
