@@ -126,8 +126,7 @@ function handleNodeLocAuth(request, env, url) {
   const redirectUri = url.origin + '/api/auth/nodeloc/callback';
   const state = crypto.randomUUID();
   
-  // 假设 NodeLoc 采用标准的 OAuth 授权地址，如果官方接口不同，请修改此处的 URL
-  const authUrl = 'https://www.nodeloc.com/oauth/authorize' + 
+  const authUrl = 'https://conn.nodeloc.cc/oauth2/auth' + 
     '?client_id=' + env.NODELOC_CLIENT_ID + 
     '&response_type=code' + 
     '&redirect_uri=' + encodeURIComponent(redirectUri) + 
@@ -141,7 +140,7 @@ async function handleNodeLocCallback(request, env, url) {
   const redirectUri = url.origin + '/api/auth/nodeloc/callback';
 
   try {
-    const tokenRes = await fetch('https://www.nodeloc.com/oauth/token', {
+    const tokenRes = await fetch('https://conn.nodeloc.cc/oauth2/token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json' },
       body: new URLSearchParams({
@@ -155,7 +154,8 @@ async function handleNodeLocCallback(request, env, url) {
     if (!tokenRes.ok) throw new Error('Failed to fetch access token');
     const tokenData = await tokenRes.json();
 
-    const userRes = await fetch('https://www.nodeloc.com/api/me', {
+    // 更新为准确的用户信息获取端点
+    const userRes = await fetch('https://conn.nodeloc.cc/oauth2/userinfo', {
       headers: { 
         'Authorization': 'Bearer ' + tokenData.access_token,
         'Accept': 'application/json'
@@ -164,8 +164,8 @@ async function handleNodeLocCallback(request, env, url) {
     if (!userRes.ok) throw new Error('Failed to fetch user info');
     const userData = await userRes.json();
     
-    // 兼容 Flarum 社区的 JSON:API 格式结构
-    let rawUsername = userData.username;
+    // 兼容取值，增强对标准 OIDC /oauth2/userinfo 返回字段的支持
+    let rawUsername = userData.username || userData.preferred_username || userData.name || userData.sub || 'user_' + Math.random().toString(36).substr(2, 5);
     if (userData.data && userData.data.attributes) {
       rawUsername = userData.data.attributes.username;
     }
@@ -770,5 +770,4 @@ function renderAdminPage() {
     loadData();
   </script>
 </body>
-</html>`;
-}
+</html>
