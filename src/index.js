@@ -230,7 +230,7 @@ async function handlePlay(request, env, url) {
   });
 }
 
-// 核心修改 1：支持多源抓取与去重
+// 支持多源抓取与去重
 async function updateM3USource(env) {
   const sourceUrlsStr = await env.IPTV_KV.get('config:source_url');
   if (!sourceUrlsStr) return { success: false, msg: 'No source URL configured' };
@@ -543,7 +543,7 @@ function renderLoginPage() {
   '    .divider::before { margin-right: 10px; } .divider::after { margin-left: 10px; }\n' +
   '  </style>\n' +
   '</head>\n' +
-  <body>\n' +
+  '<body>\n' +
   '  <div class="card">\n' +
   '    <h2>IPTV 订阅系统</h2>\n' +
   '    <input type="text" id="user" placeholder="用户名">\n' +
@@ -671,7 +671,6 @@ function renderUserDashboard(username) {
   '</html>';
 }
 
-// 核心修改 2：后台页面支持多行输入
 function renderAdminPage() {
   return '<!DOCTYPE html>\n' +
   '<html lang="zh-CN">\n' +
